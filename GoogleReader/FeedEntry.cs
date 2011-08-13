@@ -3,8 +3,12 @@
     using System;
     using System.Collections.Generic;
 
-    public struct FeedEntry : IEquatable<FeedEntry>
+    public class FeedEntry : IEquatable<FeedEntry>
     {
+        public FeedEntry()
+        {
+        }
+
         public FeedEntry(string id, DateTime published, Feed feed, string link, string title, string content)
             : this()
         {

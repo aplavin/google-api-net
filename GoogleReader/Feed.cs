@@ -4,8 +4,12 @@
     using System.Drawing;
     using System.Windows.Media.Imaging;
 
-    public struct Feed
+    public class Feed : IEquatable<Feed>
     {
+        public Feed()
+        {
+        }
+
         public Feed(string id, string title, int unreadCount, BitmapSource icon)
             : this(id, title, unreadCount, icon.ToBitmap())
         {
@@ -34,6 +38,16 @@
         public override string ToString()
         {
             return string.Format("{0} ({1})", this.Title, this.Url);
+        }
+
+        public bool Equals(Feed other)
+        {
+            return Equals(other.Id, this.Id);
+        }
+
+        public override int GetHashCode()
+        {
+            return this.Id.GetHashCode();
         }
     }
 }

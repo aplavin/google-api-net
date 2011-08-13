@@ -47,8 +47,12 @@
         /// </summary>
         public static void SetCredentials(string googleUsername, string googlePassword)
         {
-            _username = googleUsername;
-            _password = googlePassword;
+            if (_username != googleUsername || _password != googlePassword)
+            {
+                Reset();
+                _username = googleUsername;
+                _password = googlePassword;
+            }
         }
 
         /// <summary>
@@ -85,12 +89,16 @@
         }
 
         /// <summary>
-        /// Gets unread entries from the specified feed.
+        /// Gets unread entries from the specified <paramref name="feed"/>.
+        /// If <paramref name="number"/> is between 1 and 1000, then it specifies number of entries to load. Else all unread entries are loaded.
         /// </summary>
-        public static IEnumerable<FeedEntry> GetEntries(this Feed feed)
+        public static IEnumerable<FeedEntry> GetEntries(Feed feed, int number = 0)
         {
+            string request = number.InRange(1, 1001)
+                                 ? "api/0/stream/contents/feed/{0}?n=" + number + "&ck={1}"
+                                 : "api/0/stream/contents/feed/{0}?xt=user/-/state/com.google/read&n=1000&ck={1}";
             var json = GetJson(string.Format(
-                   "api/0/stream/contents/feed/{0}?xt=user/-/state/com.google/read&n=1000&ck={1}",
+                   request,
                    feed.Url,
                    DateTime.UtcNow.ToUnixTime(true)));
 
@@ -98,16 +106,16 @@
                 v => new FeedEntry(
                     id: v["id"].Value<string>(),
                     published: DateTimeUtils.FromUnixTime(v["published"].Value<long>()),
-                    feed: feed, 
-                    link: CommonUtils.TryNullReference(() => v["alternate"].First["href"].Value<string>()),
-                    title: CommonUtils.TryNullReference(() => v["title"].Value<string>()),
-                    content: CommonUtils.TryNullReference(() => v["summary"]["content"].Value<string>())));
+                    feed: feed,
+                    link: CommonUtils.NullSafe(() => v["alternate"].First["href"].Value<string>()),
+                    title: CommonUtils.NullSafe(() => v["title"].Value<string>()),
+                    content: CommonUtils.NullSafe(() => v["summary"]["content"].Value<string>())));
         }
 
         /// <summary>
         /// Gets unread entries for all specified feeds.
         /// </summary>
-        public static IEnumerable<IGrouping<Feed, FeedEntry>> GetEntries(this IEnumerable<Feed> feeds)
+        public static IEnumerable<IGrouping<Feed, FeedEntry>> GetEntries(IEnumerable<Feed> feeds)
         {
             if (feeds == null) throw new ArgumentNullException("feeds");
             if (feeds.Empty()) return Enumerable.Empty<IGrouping<Feed, FeedEntry>>();
