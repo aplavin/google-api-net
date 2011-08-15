@@ -10,21 +10,26 @@
         }
 
         public FeedEntry(string id, DateTime published, Feed feed, string link, string title, string content)
+            : this(id, published, feed.Id, link, title, content)
+        {
+        }
+
+        public FeedEntry(string id, DateTime published, string feedId, string link, string title, string content)
             : this()
         {
             if (id == null) throw new ArgumentNullException("id");
 
-            this.Id = id;
-            this.Published = published;
-            this.Feed = feed;
-            this.Link = link;
-            this.Title = title;
-            this.Content = content;
+            Id = id;
+            Published = published;
+            FeedId = feedId;
+            Link = link;
+            Title = title;
+            Content = content;
         }
 
         public string Id { get; private set; }
         public DateTime Published { get; private set; }
-        public Feed Feed { get; private set; }
+        public string FeedId { get; private set; }
         public string Link { get; private set; }
         public string Title { get; private set; }
         public string Content { get; private set; }

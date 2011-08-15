@@ -11,24 +11,71 @@
     using Newtonsoft.Json;
     using Newtonsoft.Json.Linq;
 
-    public static class GoogleReader
+    public class GoogleReader
     {
         private static readonly TimeSpan TokenExpire = TimeSpan.FromMinutes(10);
 
-        private static bool _isLoggedIn;
-        private static string _username;
-        private static string _password;
-        private static string _sid;
-        private static string _auth;
+        private bool _isLoggedIn;
+        private readonly string _username;
+        private readonly string _password;
+        private string _sid;
+        private string _auth;
 
-        private static string _token;
-        private static DateTime _tokenTaken = DateTime.MinValue;
+        public string Sid { get { return _sid; } }
+        public string Auth { get { return _auth; } }
+
+        public static bool CredentialsValid(string username, string password)
+        {
+            try
+            {
+                new GoogleReader(username, password, true);
+                return true;
+            }
+            catch (GoogleReaderException)
+            {
+                return false;
+            }
+        }
+
+        public static bool SessionValid(string sid, string auth)
+        {
+            try
+            {
+                new GoogleReader(sid, auth).GetJson("api/0/unread-count?output=json");
+                return true;
+            }
+            catch (GoogleReaderException)
+            {
+                return false;
+            }
+        }
+
+        public GoogleReader(string sid, string auth)
+        {
+            _sid = sid;
+            _auth = auth;
+            _isLoggedIn = true;
+        }
+
+        public GoogleReader(string username, string password, bool login)
+        {
+            _username = username;
+            _password = password;
+            if (login)
+            {
+                Login();
+            }
+        }
+
+        #region Token
+        private string _token;
+        private DateTime _tokenTaken = DateTime.MinValue;
 
         /// <summary>
         /// Gets authorization token, need for some operations in Google Reader. 
         /// If token is requested the first time or it has been expired, token is automatically downloaded.
         /// </summary>
-        private static string Token
+        private string Token
         {
             get
             {
@@ -42,35 +89,17 @@
             }
         }
 
-        /// <summary>
-        /// Sets username and password for Google Reader. Call this before calling any other method.
-        /// </summary>
-        public static void SetCredentials(string googleUsername, string googlePassword)
+        private string GetToken()
         {
-            if (_username != googleUsername || _password != googlePassword)
-            {
-                Reset();
-                _username = googleUsername;
-                _password = googlePassword;
-            }
+            Login();
+            return GetString("api/0/token");
         }
-
-        /// <summary>
-        /// Resets state of this class. SetCredentials is needed after it.
-        /// </summary>
-        public static void Reset()
-        {
-            _isLoggedIn = false;
-            _sid = null;
-            _auth = null;
-            _username = null;
-            _password = null;
-        }
+        #endregion
 
         /// <summary>
         /// Get list of subscribed feeds from google account.
         /// </summary>
-        public static IEnumerable<Feed> GetFeeds()
+        public IEnumerable<Feed> GetFeeds()
         {
             var unread = GetJson("api/0/unread-count?output=json")["unreadcounts"].
                 Where(f => ((string)f["id"]).StartsWith("feed/")).
@@ -84,54 +113,46 @@
                 new Feed(
                     id: p.Key,
                     title: p.Value,
-                    unreadCount: unread.ContainsKey(p.Key) ? unread[p.Key] : 0,
-                    icon: GetFavicon(p.Key.Substring(5))));
+                    unreadCount: unread.ContainsKey(p.Key) ? unread[p.Key] : 0));
         }
 
         /// <summary>
         /// Gets unread entries from the specified <paramref name="feed"/>.
         /// If <paramref name="number"/> is between 1 and 1000, then it specifies number of entries to load. Else all unread entries are loaded.
         /// </summary>
-        public static IEnumerable<FeedEntry> GetEntries(Feed feed, int number = 0)
+        public IEnumerable<FeedEntry> GetEntries(Feed feed, int number = 0)
+        {
+            return GetEntries(feed.Id, number);
+        }
+
+        /// <summary>
+        /// Gets unread entries from the feed with specified <paramref name="feedId"/>.
+        /// If <paramref name="number"/> is between 1 and 1000, then it specifies number of entries to load. Else all unread entries are loaded.
+        /// </summary>
+        public IEnumerable<FeedEntry> GetEntries(string feedId, int number = 0)
         {
             string request = number.InRange(1, 1001)
                                  ? "api/0/stream/contents/feed/{0}?n=" + number + "&ck={1}"
                                  : "api/0/stream/contents/feed/{0}?xt=user/-/state/com.google/read&n=1000&ck={1}";
             var json = GetJson(string.Format(
                    request,
-                   feed.Url,
+                   feedId.Substring(5),
                    DateTime.UtcNow.ToUnixTime(true)));
 
             return json["items"].Select(
                 v => new FeedEntry(
                     id: v["id"].Value<string>(),
                     published: DateTimeUtils.FromUnixTime(v["published"].Value<long>()),
-                    feed: feed,
+                    feedId: feedId,
                     link: CommonUtils.NullSafe(() => v["alternate"].First["href"].Value<string>()),
                     title: CommonUtils.NullSafe(() => v["title"].Value<string>()),
                     content: CommonUtils.NullSafe(() => v["summary"]["content"].Value<string>())));
         }
 
         /// <summary>
-        /// Gets unread entries for all specified feeds.
-        /// </summary>
-        public static IEnumerable<IGrouping<Feed, FeedEntry>> GetEntries(IEnumerable<Feed> feeds)
-        {
-            if (feeds == null) throw new ArgumentNullException("feeds");
-            if (feeds.Empty()) return Enumerable.Empty<IGrouping<Feed, FeedEntry>>();
-
-            int degree = CompareUtils.Clamp(feeds.Count(), 1, 63);
-
-            return feeds.
-                AsParallel().WithDegreeOfParallelism(degree).
-                SelectMany(GetEntries).
-                GroupBy(e => e.Feed);
-        }
-
-        /// <summary>
         /// Marks all entries of the specified feed as read.
         /// </summary>
-        public static void MarkAsRead(Feed feed)
+        public void MarkAsRead(Feed feed)
         {
             string res = GetString("api/0/mark-all-as-read", new { s = feed.Id, t = feed.Title, T = Token });
 
@@ -143,21 +164,9 @@
         }
 
         /// <summary>
-        /// Marks all entries of the specified feeds as read.
-        /// </summary>
-        public static void MarkAsRead(IEnumerable<Feed> feeds)
-        {
-            if (feeds == null) throw new ArgumentNullException("feeds");
-            if (feeds.Empty()) return;
-
-            int degree = Math.Min(63, feeds.Count());
-            feeds.AsParallel().WithDegreeOfParallelism(degree).ForAll(MarkAsRead);
-        }
-
-        /// <summary>
         /// Marks the specified entry as read.
         /// </summary>
-        public static void MarkAsRead(FeedEntry entry)
+        public void MarkAsRead(FeedEntry entry)
         {
             string res = GetString(
                 "api/0/edit-tag",
@@ -171,22 +180,26 @@
         }
 
         /// <summary>
-        /// Marks all specified entries as read.
+        /// Marks entry with the specified id as read.
         /// </summary>
-        public static void MarkAsRead(IEnumerable<FeedEntry> entries)
+        public void MarkAsRead(string id)
         {
-            if (entries == null) throw new ArgumentNullException("entries");
-            if (entries.Empty()) return;
+            string res = GetString(
+                "api/0/edit-tag",
+                new { i = id, a = "user/-/state/com.google/read", ac = "edit", T = Token, });
 
-            int degree = Math.Min(63, entries.Count());
-            entries.AsParallel().WithDegreeOfParallelism(degree).ForAll(MarkAsRead);
+            if (res != "OK")
+            {
+                throw new GoogleReaderException(
+                    string.Format("Mark entry '{0}' as read probably failed: Google didn't return OK.", id));
+            }
         }
 
         /// <summary>
         /// Logs into google account only in not logged in still (or Reset was called). Otherwise just returns.
         /// Username and password from settings are used.
         /// </summary>
-        private static void Login()
+        private void Login()
         {
             if (_isLoggedIn) return;
 
@@ -239,33 +252,16 @@
                 }
                 else
                 {
-                    throw new GoogleReaderException("Login to Google Reader failed: there are problems with your Internet connection or Google has changed its API.", webEx);
+                    throw new GoogleReaderException("Login to Google Reader failed: there are problems with access to Google API.", webEx);
                 }
             }
-        }
-
-        /// <summary>
-        /// Get favicon for the host of the url. Icon is fetched from google cache in png format.
-        /// </summary>
-        private static Bitmap GetFavicon(string url)
-        {
-            if (url == null) throw new ArgumentNullException("url");
-
-            Uri srcUri;
-            if (!Uri.TryCreate(url, UriKind.Absolute, out srcUri))
-            {
-                throw new ArgumentException("URL specified to get favicon is malformed");
-            }
-
-            url = string.Format("http://s2.googleusercontent.com/s2/favicons?domain={0}", srcUri.Host);
-            return ImageUtils.Download(url);
         }
 
         /// <summary>
         /// Gets response from address "http://www.google.com/reader/{url}" using SID and Auth from Login method.
         /// If not logged in - logs in.
         /// </summary>
-        private static string GetString(string url, object data = null)
+        private string GetString(string url, object data = null)
         {
             if (url == null) throw new ArgumentNullException("url");
 
@@ -317,7 +313,7 @@
             {
                 throw new GoogleReaderException(
                     string.Format(
-                    "Request to url '{0}' {1}at Google Reader failed: there are problems with your Internet connection or Google has changed its API.",
+                    "Request to url '{0}' {1}at Google Reader failed: there are problems with access to Google API.",
                     url,
                     hasData ? "(with additional POST data) " : string.Empty),
                     webEx);
@@ -327,7 +323,7 @@
         /// <summary>
         /// Gets api result from google reader as JSON object.
         /// </summary>
-        private static JObject GetJson(string url, object data = null)
+        private JObject GetJson(string url, object data = null)
         {
             if (url == null) throw new ArgumentNullException("url");
 
@@ -339,7 +335,7 @@
             {
                 throw new GoogleReaderException(
                     string.Format(
-                    "Request from URL '{0}' {1}wasn't in JSON format. Probably Google Reader API has changed.",
+                    "Request from URL '{0}' {1}wasn't in JSON format. Problem with access to Google API.",
                     url,
                     data != null ? "(with additional POST data) " : string.Empty),
                     jsonEx);
@@ -347,11 +343,11 @@
             catch (Exception ex)
             {
                 // Used JSON library can throw also just System.Exception
-                if (ex.Message.Contains("json"))
+                if (ex.Message.ContainsCi("json"))
                 {
                     throw new GoogleReaderException(
                         string.Format(
-                            "Request from URL '{0}' {1}wasn't in JSON format. Probably Google Reader API has changed.",
+                            "Request from URL '{0}' {1}wasn't in JSON format. Problem with access to Google API.",
                             url,
                             data != null ? "(with additional POST data) " : string.Empty),
                         ex);
@@ -359,12 +355,6 @@
 
                 throw;
             }
-        }
-
-        private static string GetToken()
-        {
-            Login();
-            return GetString("api/0/token");
         }
     }
 }
