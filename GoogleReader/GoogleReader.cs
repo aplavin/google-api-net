@@ -2,73 +2,56 @@
 {
     using System;
     using System.Collections.Generic;
-    using System.Drawing;
-    using System.IO;
     using System.Linq;
     using System.Net;
-    using System.Reflection;
-    using System.Text;
     using Newtonsoft.Json;
     using Newtonsoft.Json.Linq;
 
     public class GoogleReader
     {
-        private static readonly TimeSpan TokenExpire = TimeSpan.FromMinutes(10);
+        private readonly string _clientId;
+        private readonly string _clientSecret;
+        private readonly string _refreshToken;
 
-        private bool _isLoggedIn;
-        private readonly string _username;
-        private readonly string _password;
-        private string _sid;
-        private string _auth;
+        #region AccessToken
 
-        public string Sid { get { return _sid; } }
-        public string Auth { get { return _auth; } }
+        private string _accessToken;
+        private static readonly TimeSpan AccessTokenExpire = TimeSpan.FromMinutes(10);
+        private DateTime _accessTokenTaken = DateTime.MinValue;
 
-        public static bool CredentialsValid(string username, string password)
+        private string AccessToken
         {
-            try
+
+            get
             {
-                new GoogleReader(username, password, true);
-                return true;
-            }
-            catch (GoogleReaderException)
-            {
-                return false;
+                if (_accessToken == null || DateTime.Now - _accessTokenTaken > AccessTokenExpire)
+                {
+                    _accessToken = GetAccessToken();
+                    _accessTokenTaken = DateTime.Now;
+                }
+
+                return _accessToken;
             }
         }
 
-        public static bool SessionValid(string sid, string auth)
+        private string GetAccessToken()
         {
-            try
-            {
-                new GoogleReader(sid, auth).GetJson("api/0/unread-count?output=json");
-                return true;
-            }
-            catch (GoogleReaderException)
-            {
-                return false;
-            }
+            string response = InternetUtils.Fetch("https://accounts.google.com/o/oauth2/token", new
+                {
+                    client_id = _clientId,
+                    client_secret = _clientSecret,
+                    refresh_token = _refreshToken,
+                    grant_type = "refresh_token",
+                });
+            var json = JObject.Parse(response);
+            return json["access_token"].ToString();
         }
+        #endregion
 
-        public GoogleReader(string sid, string auth)
-        {
-            _sid = sid;
-            _auth = auth;
-            _isLoggedIn = true;
-        }
-
-        public GoogleReader(string username, string password, bool login)
-        {
-            _username = username;
-            _password = password;
-            if (login)
-            {
-                Login();
-            }
-        }
-
-        #region Token
+        #region Edit Token
         private string _token;
+
+        private static readonly TimeSpan TokenExpire = TimeSpan.FromMinutes(10);
         private DateTime _tokenTaken = DateTime.MinValue;
 
         /// <summary>
@@ -91,10 +74,22 @@
 
         private string GetToken()
         {
-            Login();
             return GetString("api/0/token");
         }
         #endregion
+
+        /// <summary>
+        /// Creates new instance of GoogleReader with specified OAuth parameters.
+        /// </summary>
+        /// <param name="clientId">Client ID - obtained by developer from Google</param>
+        /// <param name="clientSecret">Client secret - obtained by developer from Google</param>
+        /// <param name="refreshToken">Refresh token - obtained during authorization process</param>
+        public GoogleReader(string clientId, string clientSecret, string refreshToken)
+        {
+            _clientId = clientId;
+            _clientSecret = clientSecret;
+            _refreshToken = refreshToken;
+        }
 
         /// <summary>
         /// Get list of subscribed feeds from google account.
@@ -168,15 +163,7 @@
         /// </summary>
         public void MarkAsRead(FeedEntry entry)
         {
-            string res = GetString(
-                "api/0/edit-tag",
-                new { i = entry.Id, a = "user/-/state/com.google/read", ac = "edit", T = Token, });
-
-            if (res != "OK")
-            {
-                throw new GoogleReaderException(
-                    string.Format("Mark entry '{0}' as read probably failed: Google didn't return OK.", entry.Id));
-            }
+            MarkAsRead(entry.Id);
         }
 
         /// <summary>
@@ -186,7 +173,13 @@
         {
             string res = GetString(
                 "api/0/edit-tag",
-                new { i = id, a = "user/-/state/com.google/read", ac = "edit", T = Token, });
+                new
+                {
+                    i = id,
+                    a = "user/-/state/com.google/read",
+                    ac = "edit",
+                    T = Token,
+                });
 
             if (res != "OK")
             {
@@ -196,126 +189,25 @@
         }
 
         /// <summary>
-        /// Logs into google account only in not logged in still (or Reset was called). Otherwise just returns.
-        /// Username and password from settings are used.
-        /// </summary>
-        private void Login()
-        {
-            if (_isLoggedIn) return;
-
-            if (string.IsNullOrEmpty(_username) || string.IsNullOrEmpty(_password))
-                throw new GoogleReaderException("Google username and/or password isn't specified");
-
-            try
-            {
-                var loginRequest = (HttpWebRequest)WebRequest.Create(@"https://www.google.com/accounts/ClientLogin");
-
-                byte[] requestContent = Encoding.UTF8.GetBytes(
-                    "service={service}&Email={user}&Passwd={pass}&continue=http://www.google.com/".
-                    FormatNamed(new { service = "reader", user = _username, pass = _password }));
-
-                loginRequest.Method = "POST";
-                loginRequest.ContentType = "application/x-www-form-urlencoded";
-                loginRequest.ContentLength = requestContent.Length;
-
-                using (Stream requestStream = loginRequest.GetRequestStream())
-                {
-                    // add form data to request stream
-                    requestStream.Write(requestContent, 0, requestContent.Length);
-                }
-
-                string data;
-                using (var response = loginRequest.GetResponse())
-                using (var responseStream = response.GetResponseStream())
-                using (var sr = new StreamReader(responseStream))
-                {
-                    data = sr.ReadToEnd();
-                }
-
-                try
-                {
-                    _sid = data.Substring((data.IndexOf("SID=") + 4), (data.IndexOf("\n") - 4)).Trim();
-                    _auth = data.Substring(data.IndexOf("Auth=") + 5).Trim();
-
-                    _isLoggedIn = true;
-                }
-                catch (ArgumentOutOfRangeException ex)
-                {
-                    throw new GoogleReaderException("Wrong response format from Google ClientLogin, can't parse SID and Auth.", ex);
-                }
-            }
-            catch (WebException webEx)
-            {
-                if (((HttpWebResponse)webEx.Response).StatusCode == HttpStatusCode.Forbidden)
-                {
-                    throw new GoogleReaderException("Login to Google Reader failed: incorrect username or password.", webEx);
-                }
-                else
-                {
-                    throw new GoogleReaderException("Login to Google Reader failed: there are problems with access to Google API.", webEx);
-                }
-            }
-        }
-
-        /// <summary>
-        /// Gets response from address "http://www.google.com/reader/{url}" using SID and Auth from Login method.
+        /// Gets response from address "https://www.google.com/reader/{url}" using SID and Auth from Login method.
         /// If not logged in - logs in.
         /// </summary>
         private string GetString(string url, object data = null)
         {
             if (url == null) throw new ArgumentNullException("url");
 
-            Login();
-
-            bool hasData = data != null;
-            byte[] bytes = null;
-            if (hasData)
-            {
-                var values = data.GetType().GetMembers().
-                    Where(m => m.MemberType == MemberTypes.Field || m.MemberType == MemberTypes.Property).
-                    ToDictionary(m => m.Name, m => ((PropertyInfo)m).GetValue(data, null).ToString());
-                string post = values.Aggregate(kvp => "{0}={1}".FormatWith(kvp.Key, kvp.Value), "&");
-                bytes = new ASCIIEncoding().GetBytes(post);
-            }
-
             try
             {
-                var request = (HttpWebRequest)WebRequest.Create(string.Format(@"http://www.google.com/reader/{0}", url));
-
-                request.Headers.Add("Authorization", string.Format("GoogleLogin auth={0}", _auth));
-                request.CookieContainer = new CookieContainer();
-                request.CookieContainer.Add(new Cookie("SID", _sid, "/", ".google.com"));
-
-                if (hasData)
-                {
-                    request.Method = "POST";
-                    request.ContentType = "application/x-www-form-urlencoded";
-                    request.ContentLength = bytes.Length;
-
-                    using (var stream = request.GetRequestStream())
-                    {
-                        stream.Write(bytes, 0, bytes.Length);
-                    }
-                }
-                else
-                {
-                    request.Method = "GET";
-                }
-
-                using (var response = request.GetResponse())
-                using (var responseStream = response.GetResponseStream())
-                using (var reader = new StreamReader(responseStream))
-                {
-                    return reader.ReadToEnd();
-                }
+                return InternetUtils.Fetch("https://www.google.com/reader/" + url,
+                     data,
+                     new { Authorization = string.Format("Bearer {0}", AccessToken) });
             }
             catch (WebException webEx)
             {
                 throw new GoogleReaderException(
                     string.Format(
-                    "Request to url '{0}' {1}at Google Reader failed: there are problems with access to Google API.",
-                    url,
-                    hasData ? "(with additional POST data) " : string.Empty),
+                    "Request to url '{0}' at Google Reader failed: there are problems with access to Google API.",
+                    url),
                     webEx);
             }
         }
@@ -339,21 +231,6 @@
                     url,
                     data != null ? "(with additional POST data) " : string.Empty),
                     jsonEx);
-            }
-            catch (Exception ex)
-            {
-                // Used JSON library can throw also just System.Exception
-                if (ex.Message.ContainsCi("json"))
-                {
-                    throw new GoogleReaderException(
-                        string.Format(
-                            "Request from URL '{0}' {1}wasn't in JSON format. Problem with access to Google API.",
-                            url,
-                            data != null ? "(with additional POST data) " : string.Empty),
-                        ex);
-                }
-
-                throw;
             }
         }
     }
